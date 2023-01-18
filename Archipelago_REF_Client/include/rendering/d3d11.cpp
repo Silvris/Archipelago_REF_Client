@@ -1,4 +1,4 @@
-#include "../Plugin.hpp"
+#include "../../dllmain.h"
 #include "../imgui/imgui_impl_dx11.h"
 
 #include "d3d11.hpp"
