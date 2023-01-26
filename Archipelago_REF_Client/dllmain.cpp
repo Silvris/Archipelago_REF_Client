@@ -8,6 +8,7 @@
 #define ASIO_HAS_STD_TYPE_TRAITS
 #include <apclient.hpp>
 #include <apuuid.hpp>
+#include <nlohmann/json.hpp>
 //REF includes
 #include "include/reframework/API.h"
 #include <sol/sol.hpp>
@@ -30,7 +31,10 @@
 #include <rendering/d3d11.hpp>
 #include <rendering/d3d12.hpp>
 #include <imgui.h>
+
+#include <random>
 #include "dllmain.h"
+
 
 #ifdef __EMSCRIPTEN__
 #define DATAPACKAGE_CACHE "/settings/datapackage.json"
@@ -41,6 +45,7 @@
 #endif
 
 using namespace reframework;
+using nlohmann::json;
 
 lua_State* g_lua{ nullptr };
 
@@ -52,12 +57,16 @@ bool g_initialized{ false };
 APClient* AP = nullptr;
 
 bool isOpen = false;
+bool isWithoutRando = true;
 
 // Function Prototypes
 bool APClientSay(std::string msg);
 bool ConnectAP(std::string uri = "");
 
+std::default_random_engine* randgen;
 
+
+#pragma region IMGUIFunctions
 //-----------------------------------------------------------------------------
 // [SECTION] Example App: Debug Console / ShowExampleAppConsole()
 //-----------------------------------------------------------------------------
@@ -68,6 +77,8 @@ struct ExampleAppConsole
 {
     char                  ConnectBuf[256];
     char                  InputBuf[256];
+    char                  UserBuf[256];
+    char                  PassBuf[256];
     ImVector<char*>       Items;
     ImVector<const char*> Commands;
     ImVector<char*>       History;
@@ -105,6 +116,8 @@ struct ExampleAppConsole
 
     void    ShowHelpInformation() {
         AddLog("/help\nShows all possible commands and information about their use.");
+        AddLog("/connect [address]\n Attempts to connect to Archipelago at the given address, or the default address if none is given.");
+        AddLog("/disconnect\n Disconnects from Archipelago if currently connected.");
 
     }
 
@@ -127,155 +140,140 @@ struct ExampleAppConsole
         Items.push_back(Strdup(buf));
     }
 
-    void    Draw(const char* title, bool* p_open)
+    void    Draw(const char* title)
     {
-        ImGui::SetNextWindowSize(ImVec2(520, 600), ImGuiCond_FirstUseEver);
-        if (!ImGui::Begin(title, p_open))
-        {
-            ImGui::End();
-            return;
-        }
-
-        // As a specific feature guaranteed by the library, after calling Begin() the last Item represent the title bar.
-        // So e.g. IsItemHovered() will return true when hovering the title bar.
-        // Here we create a context menu only available from the title bar.
-        if (ImGui::BeginPopupContextItem())
-        {
-            if (ImGui::MenuItem("Close Client"))
-                *p_open = false;
-            ImGui::EndPopup();
-        }
-        ImGui::InputText("##", ConnectBuf, 256);
-
-        // TODO: display items starting from the bottom
-
-        if (ImGui::SmallButton("Connect")) { ConnectAP(std::string(ConnectBuf)); }
-        ImGui::SameLine();
-        bool copy_to_clipboard = ImGui::SmallButton("Copy");
-        //static float t = 0.0f; if (ImGui::GetTime() - t > 0.02f) { t = ImGui::GetTime(); AddLog("Spam %f", t); }
-
-        ImGui::Separator();
-
-        // Options menu
-        if (ImGui::BeginPopup("Options"))
-        {
-            ImGui::Checkbox("Auto-scroll", &AutoScroll);
-            ImGui::EndPopup();
-        }
-
-        // Options, Filter
-        if (ImGui::Button("Options"))
-            ImGui::OpenPopup("Options");
-        ImGui::SameLine();
-        Filter.Draw("Filter (\"incl,-excl\") (\"error\")", 180);
-        ImGui::Separator();
-
-        // Reserve enough left-over height for 1 separator + 1 input text
-        const float footer_height_to_reserve = ImGui::GetStyle().ItemSpacing.y + ImGui::GetFrameHeightWithSpacing();
-        if (ImGui::BeginChild("ScrollingRegion", ImVec2(0, -footer_height_to_reserve), false, ImGuiWindowFlags_HorizontalScrollbar))
-        {
-            if (ImGui::BeginPopupContextWindow())
+        const auto& api = API::get();
+        if (api->reframework()->is_drawing_ui()) {
+            bool copy_to_clipboard = false;
+            ImGui::SetNextWindowSize(ImVec2(520, 600), ImGuiCond_FirstUseEver);
+            if (!ImGui::Begin(title))
             {
-                if (ImGui::Selectable("Clear")) ClearLog();
+                ImGui::End();
+                return;
+            }
+
+            ImGui::InputText(": Server", ConnectBuf, 256);
+            ImGui::SameLine();
+            // TODO: display items starting from the bottom
+
+            if (ImGui::SmallButton("Connect")) { ConnectAP(std::string(ConnectBuf)); }
+            ImGui::InputText(": Username", UserBuf, 256);
+            ImGui::InputText(": Password", PassBuf, 256);
+
+            if (ImGui::SmallButton("Copy to Clipboard")) {
+                copy_to_clipboard = false;
+            }
+            //static float t = 0.0f; if (ImGui::GetTime() - t > 0.02f) { t = ImGui::GetTime(); AddLog("Spam %f", t); }
+
+            ImGui::Separator();
+
+            // Options menu
+            if (ImGui::BeginPopup("Options"))
+            {
+                ImGui::Checkbox("Auto-scroll", &AutoScroll);
                 ImGui::EndPopup();
             }
 
-            // Display every line as a separate entry so we can change their color or add custom widgets.
-            // If you only want raw text you can use ImGui::TextUnformatted(log.begin(), log.end());
-            // NB- if you have thousands of entries this approach may be too inefficient and may require user-side clipping
-            // to only process visible items. The clipper will automatically measure the height of your first item and then
-            // "seek" to display only items in the visible area.
-            // To use the clipper we can replace your standard loop:
-            //      for (int i = 0; i < Items.Size; i++)
-            //   With:
-            //      ImGuiListClipper clipper;
-            //      clipper.Begin(Items.Size);
-            //      while (clipper.Step())
-            //         for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
-            // - That your items are evenly spaced (same height)
-            // - That you have cheap random access to your elements (you can access them given their index,
-            //   without processing all the ones before)
-            // You cannot this code as-is if a filter is active because it breaks the 'cheap random-access' property.
-            // We would need random-access on the post-filtered list.
-            // A typical application wanting coarse clipping and filtering may want to pre-compute an array of indices
-            // or offsets of items that passed the filtering test, recomputing this array when user changes the filter,
-            // and appending newly elements as they are inserted. This is left as a task to the user until we can manage
-            // to improve this example code!
-            // If your items are of variable height:
-            // - Split them into same height items would be simpler and facilitate random-seeking into your list.
-            // - Consider using manual call to IsRectVisible() and skipping extraneous decoration from your items.
-            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 1)); // Tighten spacing
-            if (copy_to_clipboard)
-                ImGui::LogToClipboard();
-            for (int i = 0; i < Items.Size; i++)
+            // Options, Filter
+            if (ImGui::Button("Options"))
+                ImGui::OpenPopup("Options");
+            ImGui::Separator();
+
+            // Reserve enough left-over height for 1 separator + 1 input text
+            const float footer_height_to_reserve = ImGui::GetStyle().ItemSpacing.y + ImGui::GetFrameHeightWithSpacing();
+            if (ImGui::BeginChild("ScrollingRegion", ImVec2(0, -footer_height_to_reserve), false, ImGuiWindowFlags_HorizontalScrollbar))
             {
-                const char* item = Items[i];
-                if (!Filter.PassFilter(item))
-                    continue;
+                if (ImGui::BeginPopupContextWindow())
+                {
+                    if (ImGui::Selectable("Clear")) ClearLog();
+                    ImGui::EndPopup();
+                }
 
-                // Normally you would store more information in your item than just a string.
-                // (e.g. make Items[] an array of structure, store color/type etc.)
-                ImVec4 color;
-                bool has_color = false;
-                if (strstr(item, "[error]")) { color = ImVec4(1.0f, 0.4f, 0.4f, 1.0f); has_color = true; }
-                else if (strncmp(item, "# ", 2) == 0) { color = ImVec4(1.0f, 0.8f, 0.6f, 1.0f); has_color = true; }
-                if (has_color)
-                    ImGui::PushStyleColor(ImGuiCol_Text, color);
-                ImGui::TextUnformatted(item);
-                if (has_color)
-                    ImGui::PopStyleColor();
+                // Display every line as a separate entry so we can change their color or add custom widgets.
+                // If you only want raw text you can use ImGui::TextUnformatted(log.begin(), log.end());
+                // NB- if you have thousands of entries this approach may be too inefficient and may require user-side clipping
+                // to only process visible items. The clipper will automatically measure the height of your first item and then
+                // "seek" to display only items in the visible area.
+                // To use the clipper we can replace your standard loop:
+                //      for (int i = 0; i < Items.Size; i++)
+                //   With:
+                //      ImGuiListClipper clipper;
+                //      clipper.Begin(Items.Size);
+                //      while (clipper.Step())
+                //         for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
+                // - That your items are evenly spaced (same height)
+                // - That you have cheap random access to your elements (you can access them given their index,
+                //   without processing all the ones before)
+                // You cannot this code as-is if a filter is active because it breaks the 'cheap random-access' property.
+                // We would need random-access on the post-filtered list.
+                // A typical application wanting coarse clipping and filtering may want to pre-compute an array of indices
+                // or offsets of items that passed the filtering test, recomputing this array when user changes the filter,
+                // and appending newly elements as they are inserted. This is left as a task to the user until we can manage
+                // to improve this example code!
+                // If your items are of variable height:
+                // - Split them into same height items would be simpler and facilitate random-seeking into your list.
+                // - Consider using manual call to IsRectVisible() and skipping extraneous decoration from your items.
+                ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4, 1)); // Tighten spacing
+                if (copy_to_clipboard)
+                    ImGui::LogToClipboard();
+                for (int i = 0; i < Items.Size; i++)
+                {
+                    const char* item = Items[i];
+                    if (!Filter.PassFilter(item))
+                        continue;
+
+                    // Normally you would store more information in your item than just a string.
+                    // (e.g. make Items[] an array of structure, store color/type etc.)
+                    ImVec4 color;
+                    bool has_color = false;
+                    if (strstr(item, "[error]")) { color = ImVec4(1.0f, 0.4f, 0.4f, 1.0f); has_color = true; }
+                    else if (strncmp(item, "# ", 2) == 0) { color = ImVec4(1.0f, 0.8f, 0.6f, 1.0f); has_color = true; }
+                    if (has_color)
+                        ImGui::PushStyleColor(ImGuiCol_Text, color);
+                    ImGui::TextUnformatted(item);
+                    if (has_color)
+                        ImGui::PopStyleColor();
+                }
+                if (copy_to_clipboard)
+                    ImGui::LogFinish();
+
+                // Keep up at the bottom of the scroll region if we were already at the bottom at the beginning of the frame.
+                // Using a scrollbar or mouse-wheel will take away from the bottom edge.
+                if (ScrollToBottom || (AutoScroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY()))
+                    ImGui::SetScrollHereY(1.0f);
+                ScrollToBottom = false;
+
+                ImGui::PopStyleVar();
             }
-            if (copy_to_clipboard)
-                ImGui::LogFinish();
+            ImGui::EndChild();
+            ImGui::Separator();
 
-            // Keep up at the bottom of the scroll region if we were already at the bottom at the beginning of the frame.
-            // Using a scrollbar or mouse-wheel will take away from the bottom edge.
-            if (ScrollToBottom || (AutoScroll && ImGui::GetScrollY() >= ImGui::GetScrollMaxY()))
-                ImGui::SetScrollHereY(1.0f);
-            ScrollToBottom = false;
+            // Command-line
+            bool reclaim_focus = false;
+            ImGuiInputTextFlags input_text_flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_EscapeClearsAll | ImGuiInputTextFlags_CallbackCompletion | ImGuiInputTextFlags_CallbackHistory;
+            if (ImGui::InputText("Input", InputBuf, IM_ARRAYSIZE(InputBuf), input_text_flags, &TextEditCallbackStub, (void*)this))
+            {
+                char* s = InputBuf;
+                Strtrim(s);
+                if (s[0])
+                    ExecCommand(s);
+                strcpy(s, "");
+                reclaim_focus = true;
+            }
 
-            ImGui::PopStyleVar();
+            // Auto-focus on window apparition
+            ImGui::SetItemDefaultFocus();
+            if (reclaim_focus)
+                ImGui::SetKeyboardFocusHere(-1); // Auto focus previous widget
+
+            ImGui::End();
         }
-        ImGui::EndChild();
-        ImGui::Separator();
-
-        // Command-line
-        bool reclaim_focus = false;
-        ImGuiInputTextFlags input_text_flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_EscapeClearsAll | ImGuiInputTextFlags_CallbackCompletion | ImGuiInputTextFlags_CallbackHistory;
-        if (ImGui::InputText("Input", InputBuf, IM_ARRAYSIZE(InputBuf), input_text_flags, &TextEditCallbackStub, (void*)this))
-        {
-            char* s = InputBuf;
-            Strtrim(s);
-            if (s[0])
-                ExecCommand(s);
-            strcpy(s, "");
-            reclaim_focus = true;
-        }
-
-        // Auto-focus on window apparition
-        ImGui::SetItemDefaultFocus();
-        if (reclaim_focus)
-            ImGui::SetKeyboardFocusHere(-1); // Auto focus previous widget
-
-        ImGui::End();
     }
 
     void    ExecCommand(const char* command_line)
     {
-        AddLog("# %s\n", command_line);
-
-        // Insert into history. First find match and delete it so it can be pushed to the back.
-        // This isn't trying to be smart or optimal.
-        HistoryPos = -1;
-        for (int i = History.Size - 1; i >= 0; i--)
-            if (Stricmp(History[i], command_line) == 0)
-            {
-                free(History[i]);
-                History.erase(History.begin() + i);
-                break;
-            }
-        History.push_back(Strdup(command_line));
         if (command_line[0] == '/') {
+            AddLog("# %s\n", command_line);
             // Process command
             if (Stricmp(command_line, "/help") == 0)
             {
@@ -292,16 +290,15 @@ struct ExampleAppConsole
             else if (Stricmp(command_line, "/disconnect")) {
 
             }
-            else if (command_line[0] == '/') {
-                AddLog("Unknown command: '%s'\n", command_line);
-            }
-            else if (!AP || !(AP -> get_state() > APClient::State::SOCKET_CONNECTED) ){
+            else if (!AP || !(AP->get_state() > APClient::State::SOCKET_CONNECTED)) {
                 AddLog("Not connected to AP, please connect first.");
             }
-            else
-            {
-                APClientSay(std::string(command_line));
+            else {
+                AddLog("Unknown command: '%s'\n", command_line);
             }
+        }
+        else {
+            APClientSay(std::string(command_line));
         }
         // On command input, we scroll to bottom even if AutoScroll==false
         ScrollToBottom = true;
@@ -419,8 +416,70 @@ struct ExampleAppConsole
 static ExampleAppConsole console;
 static void ShowExampleAppConsole(bool* p_open)
 {
+    console.Draw("Archipelago Client");
+}
 
-    console.Draw("Archipelago Client", p_open);
+void set_imgui_style() noexcept {
+    ImGui::StyleColorsDark();
+
+    auto& style = ImGui::GetStyle();
+    style.WindowRounding = 0.0f;
+    style.ChildRounding = 0.0f;
+    style.PopupRounding = 0.0f;
+    style.FrameRounding = 0.0f;
+    style.ScrollbarRounding = 2.0f;
+    style.GrabRounding = 0.0f;
+    style.TabRounding = 0.0f;
+    style.WindowBorderSize = 2.0f;
+    style.WindowPadding = ImVec2(2.0f, 0.0f);
+
+    auto& colors = ImGui::GetStyle().Colors;
+    // Window BG
+    colors[ImGuiCol_WindowBg] = ImVec4{ 0.1f, 0.105f, 0.11f, 1.0f };
+
+    // Navigatation highlight
+    colors[ImGuiCol_NavHighlight] = ImVec4{ 0.3f, 0.305f, 0.31f, 1.0f };
+
+    // Headers
+    colors[ImGuiCol_Header] = ImVec4{ 0.2f, 0.205f, 0.21f, 1.0f };
+    colors[ImGuiCol_HeaderHovered] = ImVec4{ 0.3f, 0.305f, 0.31f, 1.0f };
+    colors[ImGuiCol_HeaderActive] = ImVec4{ 0.55f, 0.5505f, 0.551f, 1.0f };
+
+    // Buttons
+    colors[ImGuiCol_Button] = ImVec4{ 0.2f, 0.205f, 0.21f, 1.0f };
+    colors[ImGuiCol_ButtonHovered] = ImVec4{ 0.3f, 0.305f, 0.31f, 1.0f };
+    colors[ImGuiCol_ButtonActive] = ImVec4{ 0.55f, 0.5505f, 0.551f, 1.0f };
+
+    // Checkbox
+    colors[ImGuiCol_CheckMark] = ImVec4(0.55f, 0.5505f, 0.551f, 1.0f);
+
+    // Frame BG
+    colors[ImGuiCol_FrameBg] = ImVec4{ 0.211f, 0.210f, 0.25f, 1.0f };
+    colors[ImGuiCol_FrameBgHovered] = ImVec4{ 0.3f, 0.305f, 0.31f, 1.0f };
+    colors[ImGuiCol_FrameBgActive] = ImVec4{ 0.55f, 0.5505f, 0.551f, 1.0f };
+
+    // Tabs
+    colors[ImGuiCol_Tab] = ImVec4{ 0.25f, 0.2505f, 0.251f, 1.0f };
+    colors[ImGuiCol_TabHovered] = ImVec4{ 0.38f, 0.3805f, 0.381f, 1.0f };
+    colors[ImGuiCol_TabActive] = ImVec4{ 0.28f, 0.2805f, 0.281f, 1.0f };
+    colors[ImGuiCol_TabUnfocused] = ImVec4{ 0.25f, 0.2505f, 0.251f, 1.0f };
+    colors[ImGuiCol_TabUnfocusedActive] = ImVec4{ 0.8f, 0.805f, 0.81f, 1.0f };
+
+    // Resize Grip
+    colors[ImGuiCol_ResizeGrip] = ImVec4{ 0.2f, 0.205f, 0.21f, 0.0f };
+    colors[ImGuiCol_ResizeGripHovered] = ImVec4{ 0.3f, 0.305f, 0.31f, 1.0f };
+    colors[ImGuiCol_ResizeGripActive] = ImVec4{ 0.55f, 0.5505f, 0.551f, 1.0f };
+
+    // Title
+    colors[ImGuiCol_TitleBg] = ImVec4{ 0.25f, 0.2505f, 0.251f, 1.0f };
+    colors[ImGuiCol_TitleBgActive] = ImVec4{ 0.55f, 0.5505f, 0.551f, 1.0f };
+    colors[ImGuiCol_TitleBgCollapsed] = ImVec4{ 0.25f, 0.2505f, 0.251f, 1.0f };
+
+    const auto& fonts = ImGui::GetIO().Fonts;
+
+    fonts->Clear();
+    fonts->AddFontFromMemoryCompressedTTF(RobotoMedium_compressed_data, RobotoMedium_compressed_size, 16.0f);
+    fonts->Build();
 }
 
 bool initialize_imgui() {
@@ -456,62 +515,132 @@ bool initialize_imgui() {
         }
     }
 
+    set_imgui_style();
+
     g_initialized = true;
     return true;
 }
 
-bool ConnectAP(std::string uri) {
-    API::LuaLock _{};
-    sol::state_view lua{ g_lua };
-
-    std::string uuid = ap_get_uuid(UUID_FILE);
-
-    if (AP) delete AP;
-    AP = nullptr;
-
-    if (!uri.empty() && uri.find("ws://") != 0 && uri.find("wss://") != 0) uri = "ws://" + uri;
-
-    std::string game = lua["APGameName"];
-
-    console.AddLog("Connecting to AP...");
-    if (uri.empty()) AP = new APClient(uuid, game);
-    else AP = new APClient(uuid, game, uri);
-    AP->set_print_handler([](const std::string& msg) {
-        console.AddLog(msg.c_str());
-        });
-
-    AP->set_print_json_handler([](const std::list<APClient::TextNode>& msg) {
-        console.AddLog(AP->render_json(msg, APClient::RenderFormat::TEXT).c_str());
-        });
-    return true;
 
 
-}
+#pragma endregion
 
+#pragma region ArchipelagoFunctions
 bool APClientSay(std::string msg) {
     if (AP == nullptr || !(AP->get_state() == APClient::State::SLOT_CONNECTED)) return false;
     return AP->Say(msg);
 
 }
 
-bool APClientConnectSlot(std::string name, std::string password, int items_handling, sol::table tags) {
-    if (AP == nullptr || !(AP->get_state() == APClient::State::SOCKET_CONNECTED)) return false;
-    std::list<std::string> ts = std::list<std::string>();
-    int argc = tags.size();
-    for (int i = 1; i <= argc; i++) {
-        ts.push_back(tags[i]);
-    }
-    return AP->ConnectSlot(name, password, items_handling, ts);
-}
-
 bool APClientIsConnected() {
-    return AP != nullptr && (AP->get_state() == APClient::State::SOCKET_CONNECTED);
+    return AP != nullptr && (AP->get_state() > APClient::State::SOCKET_CONNECTED);
 }
 
 bool APClientGameComplete() {
     return AP != nullptr && AP->StatusUpdate(APClient::ClientStatus::GOAL);
 }
 
+bool ConnectAP(std::string uri) {
+    try {
+        API::LuaLock _{};
+        sol::state_view lua{ g_lua };
+
+        std::string uuid = ap_get_uuid(UUID_FILE);
+
+        if (AP) delete AP;
+        AP = nullptr;
+
+        if (!uri.empty() && uri.find("ws://") != 0 && uri.find("wss://") != 0) uri = "ws://" + uri;
+        std::string game = lua["APGameName"];
+        if (!game.empty()) {
+            isWithoutRando = false;
+        }
+        console.AddLog("Connecting to AP...");
+        if (uri.empty()) AP = new APClient(uuid, game);
+        else AP = new APClient(uuid, game, uri);
+        AP->set_socket_connected_handler([]() {
+            });
+        AP->set_socket_disconnected_handler([]() {
+            });
+        AP->set_slot_connected_handler([](const json& data) {
+
+            });
+        AP->set_room_info_handler([]() {
+            API::LuaLock _{};
+            sol::state_view lua{ g_lua };
+            std::list<std::string>* tags = new std::list<std::string>();
+            tags->push_back("AP");
+            if (isWithoutRando) {
+                tags->push_back("TextOnly");
+            }
+            if (!AP->ConnectSlot(std::string(console.UserBuf), std::string(console.PassBuf), 1, *tags)) {
+                console.AddLog("Failed to connect to the slot.");
+            }
+            }
+        );
+        AP->set_data_package_changed_handler([](const json& data) {
+            AP->save_data_package(DATAPACKAGE_CACHE);
+            });
+        AP->set_print_handler([](const std::string& msg) {
+            console.AddLog(msg.c_str());
+            });
+
+        AP->set_print_json_handler([](const std::list<APClient::TextNode>& msg) {
+            console.AddLog(AP->render_json(msg, APClient::RenderFormat::TEXT).c_str());
+            });
+        return true;
+    }
+    catch (std::string error) {
+        console.AddLog(error.c_str());
+        return false;
+    }
+
+}
+#pragma endregion
+
+
+#pragma region RandomizationFunctions
+
+std::string random_string(size_t length)
+{
+    auto randchar = []() -> char
+    {
+        const char charset[] =
+            "0123456789"
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            "abcdefghijklmnopqrstuvwxyz";
+        const size_t max_index = (sizeof(charset) - 1);
+        return charset[rand() % max_index];
+    };
+    std::string str(length, 0);
+    std::generate_n(str.begin(), length, randchar);
+    return str;
+}//copied from StackOverflow, by user Carl
+
+void SetSpecificSeed(std::string seed) {
+    std::seed_seq seedseq(seed.begin(), seed.end());
+    randgen = new std::default_random_engine(seedseq);
+}
+
+void SetRandomSeed() {
+    std::string seed = random_string(32);
+    SetSpecificSeed(seed);
+}
+
+int UniformRandomInteger(int min, int max) {
+    std::uniform_int_distribution<int> gen(min, max);
+    return gen(randgen);
+}
+
+int NormalRandomInteger(int mu, int sigma) {
+    //we don't check bounds here, so the user must check for bounds themself
+    std::normal_distribution<int> gen(mu, sigma);
+    return gen(randgen);
+}
+
+#pragma endregion
+
+#pragma region REFFunctions
 void on_lua_state_created(lua_State* l) {
     API::LuaLock _{};
 
@@ -523,7 +652,6 @@ void on_lua_state_created(lua_State* l) {
     // adds a new function to call from lua!
     lua["APGameName"] = ""; //Default to allow for calling as a text client, and ensure connection doesn't immediately fail
     lua["APClientSay"] = APClientSay;
-    lua["APClientConnectSlot"] = APClientConnectSlot;
 }
 
 void on_lua_state_destroyed(lua_State* l) {
@@ -598,6 +726,10 @@ bool on_message(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     return !ImGui::GetIO().WantCaptureMouse && !ImGui::GetIO().WantCaptureKeyboard;
 }
 
+void update_ap() {
+    if (AP) AP->poll();
+}
+
 extern "C" __declspec(dllexport) void reframework_plugin_required_version(REFrameworkPluginVersion * version) {
     version->major = REFRAMEWORK_PLUGIN_VERSION_MAJOR;
     version->minor = REFRAMEWORK_PLUGIN_VERSION_MINOR;
@@ -610,81 +742,18 @@ extern "C" __declspec(dllexport) void reframework_plugin_required_version(REFram
 extern "C" __declspec(dllexport) bool reframework_plugin_initialize(const REFrameworkPluginInitializeParam * param) {
     API::initialize(param);
     ImGui::CreateContext();
-
+    std::srand(time(NULL));//for seed generation
     const auto functions = param->functions;
     functions->on_lua_state_created(on_lua_state_created);
     functions->on_lua_state_destroyed(on_lua_state_destroyed);
     functions->on_present(on_present);
     functions->on_device_reset(on_device_reset);
     functions->on_message((REFOnMessageCb)on_message);
-
+    functions->on_pre_application_entry("BeginRendering", update_ap);
 
     return true;
 }
-/*
-void set_imgui_style() noexcept {
-    ImGui::StyleColorsDark();
-
-    auto& style = ImGui::GetStyle();
-    style.WindowRounding = 0.0f;
-    style.ChildRounding = 0.0f;
-    style.PopupRounding = 0.0f;
-    style.FrameRounding = 0.0f;
-    style.ScrollbarRounding = 2.0f;
-    style.GrabRounding = 0.0f;
-    style.TabRounding = 0.0f;
-    style.WindowBorderSize = 2.0f;
-    style.WindowPadding = ImVec2(2.0f, 0.0f);
-
-    auto& colors = ImGui::GetStyle().Colors;
-    // Window BG
-    colors[ImGuiCol_WindowBg] = ImVec4{ 0.1f, 0.105f, 0.11f, 1.0f };
-
-    // Navigatation highlight
-    colors[ImGuiCol_NavHighlight] = ImVec4{ 0.3f, 0.305f, 0.31f, 1.0f };
-
-    // Headers
-    colors[ImGuiCol_Header] = ImVec4{ 0.2f, 0.205f, 0.21f, 1.0f };
-    colors[ImGuiCol_HeaderHovered] = ImVec4{ 0.3f, 0.305f, 0.31f, 1.0f };
-    colors[ImGuiCol_HeaderActive] = ImVec4{ 0.55f, 0.5505f, 0.551f, 1.0f };
-
-    // Buttons
-    colors[ImGuiCol_Button] = ImVec4{ 0.2f, 0.205f, 0.21f, 1.0f };
-    colors[ImGuiCol_ButtonHovered] = ImVec4{ 0.3f, 0.305f, 0.31f, 1.0f };
-    colors[ImGuiCol_ButtonActive] = ImVec4{ 0.55f, 0.5505f, 0.551f, 1.0f };
-
-    // Checkbox
-    colors[ImGuiCol_CheckMark] = ImVec4(0.55f, 0.5505f, 0.551f, 1.0f);
-
-    // Frame BG
-    colors[ImGuiCol_FrameBg] = ImVec4{ 0.211f, 0.210f, 0.25f, 1.0f };
-    colors[ImGuiCol_FrameBgHovered] = ImVec4{ 0.3f, 0.305f, 0.31f, 1.0f };
-    colors[ImGuiCol_FrameBgActive] = ImVec4{ 0.55f, 0.5505f, 0.551f, 1.0f };
-
-    // Tabs
-    colors[ImGuiCol_Tab] = ImVec4{ 0.25f, 0.2505f, 0.251f, 1.0f };
-    colors[ImGuiCol_TabHovered] = ImVec4{ 0.38f, 0.3805f, 0.381f, 1.0f };
-    colors[ImGuiCol_TabActive] = ImVec4{ 0.28f, 0.2805f, 0.281f, 1.0f };
-    colors[ImGuiCol_TabUnfocused] = ImVec4{ 0.25f, 0.2505f, 0.251f, 1.0f };
-    colors[ImGuiCol_TabUnfocusedActive] = ImVec4{ 0.8f, 0.805f, 0.81f, 1.0f };
-
-    // Resize Grip
-    colors[ImGuiCol_ResizeGrip] = ImVec4{ 0.2f, 0.205f, 0.21f, 0.0f };
-    colors[ImGuiCol_ResizeGripHovered] = ImVec4{ 0.3f, 0.305f, 0.31f, 1.0f };
-    colors[ImGuiCol_ResizeGripActive] = ImVec4{ 0.55f, 0.5505f, 0.551f, 1.0f };
-
-    // Title
-    colors[ImGuiCol_TitleBg] = ImVec4{ 0.25f, 0.2505f, 0.251f, 1.0f };
-    colors[ImGuiCol_TitleBgActive] = ImVec4{ 0.55f, 0.5505f, 0.551f, 1.0f };
-    colors[ImGuiCol_TitleBgCollapsed] = ImVec4{ 0.25f, 0.2505f, 0.251f, 1.0f };
-
-    const auto& fonts = ImGui::GetIO().Fonts;
-
-    fonts->Clear();
-    fonts->AddFontFromMemoryCompressedTTF(RobotoMedium_compressed_data, RobotoMedium_compressed_size, 16.0f);
-    fonts->Build();
-}
-*/
+#pragma endregion
 
 BOOL APIENTRY DllMain( HMODULE hModule,
                        DWORD  ul_reason_for_call,
