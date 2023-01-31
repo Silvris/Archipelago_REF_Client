@@ -60,7 +60,7 @@ bool isOpen = false;
 bool isWithoutRando = true;
 
 // Function Prototypes
-bool APClientSay(std::string msg);
+bool APSay(std::string msg);
 bool ConnectAP(std::string uri = "");
 
 std::default_random_engine* randgen;
@@ -230,7 +230,7 @@ struct ExampleAppConsole
                     else if (strncmp(item, "# ", 2) == 0) { color = ImVec4(1.0f, 0.8f, 0.6f, 1.0f); has_color = true; }
                     if (has_color)
                         ImGui::PushStyleColor(ImGuiCol_Text, color);
-                    ImGui::TextUnformatted(item);
+                    ImGui::Text(item);
                     if (has_color)
                         ImGui::PopStyleColor();
                 }
@@ -298,7 +298,7 @@ struct ExampleAppConsole
             }
         }
         else {
-            APClientSay(std::string(command_line));
+            APSay(std::string(command_line));
         }
         // On command input, we scroll to bottom even if AutoScroll==false
         ScrollToBottom = true;
@@ -526,18 +526,73 @@ bool initialize_imgui() {
 #pragma endregion
 
 #pragma region ArchipelagoFunctions
-bool APClientSay(std::string msg) {
+bool APSay(std::string msg) {
     if (AP == nullptr || !(AP->get_state() == APClient::State::SLOT_CONNECTED)) return false;
     return AP->Say(msg);
 
 }
 
-bool APClientIsConnected() {
+bool APIsConnected() {
     return AP != nullptr && (AP->get_state() > APClient::State::SOCKET_CONNECTED);
 }
 
-bool APClientGameComplete() {
+bool APGameComplete() {
     return AP != nullptr && AP->StatusUpdate(APClient::ClientStatus::GOAL);
+}
+
+std::string APGetItemName(int item_id) {
+    if (AP == nullptr) return "";
+    return AP->get_item_name(item_id);
+}
+
+std::string APGetLocationName(int location_id) {
+    if (AP == nullptr) return "";
+    return AP->get_location_name(location_id);
+}
+
+std::string APGetPlayerAlias(int player_id) {
+    if (AP == nullptr) return "Unknown Player";
+    return AP->get_player_alias(player_id);
+}
+
+std::string APGetSeed() {
+    if (AP == nullptr) return "";
+    return AP->get_seed();
+}
+
+std::string APGetSlot() {
+    if (AP == nullptr) return "";
+    return AP->get_slot();
+}
+
+int APGetPlayerNumber() {
+    if (AP == nullptr) return -1;
+    return AP->get_player_number();
+}
+
+int APGetTeamNumber() {
+    if (AP == nullptr) return -1;
+    return AP->get_team_number();
+}
+
+sol::table JsonToTable(const json& data) {
+    API::LuaLock _{};
+    sol::state_view lua{ g_lua };
+    sol::table tab(lua, sol::create);
+    for (auto& it : data.items()) {
+        if (it.value().is_object() || it.value().is_array()) {
+            tab.set(it.key(), JsonToTable(it.value()));
+        }
+        else if (it.value().is_boolean())
+            tab.set(it.key(), it.value().get<bool>());
+        else if (it.value().is_number_integer())
+            tab.set(it.key(), it.value().get<int>());
+        else if (it.value().is_number_float())
+            tab.set(it.key(), it.value().get<float>());
+        else if (it.value().is_string())
+            tab.set(it.key(), it.value().get<std::string>());
+    }
+    return tab;
 }
 
 bool ConnectAP(std::string uri) {
@@ -559,11 +614,19 @@ bool ConnectAP(std::string uri) {
         if (uri.empty()) AP = new APClient(uuid, game);
         else AP = new APClient(uuid, game, uri);
         AP->set_socket_connected_handler([]() {
+            API::LuaLock _{};
+            sol::state_view lua{ g_lua };
+            lua["APSocketConnectedHandler"]();
             });
         AP->set_socket_disconnected_handler([]() {
+            API::LuaLock _{};
+            sol::state_view lua{ g_lua };
+            lua["APSocketDisconnectedHandler"]();
             });
         AP->set_slot_connected_handler([](const json& data) {
-
+            API::LuaLock _{};
+            sol::state_view lua{ g_lua };
+            lua["APSlotConnectedHandler"](JsonToTable(data));
             });
         AP->set_room_info_handler([]() {
             API::LuaLock _{};
@@ -573,20 +636,51 @@ bool ConnectAP(std::string uri) {
             if (isWithoutRando) {
                 tags->push_back("TextOnly");
             }
-            if (!AP->ConnectSlot(std::string(console.UserBuf), std::string(console.PassBuf), 1, *tags)) {
+            if (!AP->ConnectSlot(std::string(console.UserBuf), std::string(console.PassBuf), 7, *tags, {0,3,5})) {
                 console.AddLog("Failed to connect to the slot.");
             }
             }
         );
+        AP->set_items_received_handler([](const std::list<APClient::NetworkItem>& data) {
+
+            });
+        AP->set_location_checked_handler([](const std::list<int64_t>& data) {
+
+            });
         AP->set_data_package_changed_handler([](const json& data) {
             AP->save_data_package(DATAPACKAGE_CACHE);
             });
         AP->set_print_handler([](const std::string& msg) {
+            API::LuaLock _{};
+            sol::state_view lua{ g_lua };
             console.AddLog(msg.c_str());
+            lua["APPrintHandler"](msg);
             });
 
         AP->set_print_json_handler([](const std::list<APClient::TextNode>& msg) {
+            API::LuaLock _{};
+            sol::state_view lua{ g_lua };
             console.AddLog(AP->render_json(msg, APClient::RenderFormat::TEXT).c_str());
+            sol::table tab(lua, sol::create);
+            int i = 1;
+            for(auto it : msg)
+            {
+                sol::table table(lua, sol::create);
+                table.set(
+                    "type", it.type.c_str(),
+                    "color", it.color.c_str(),
+                    "player", it.player,
+                    "text", it.text.c_str(),
+                    "flags", it.flags);
+                tab.set(i, table);
+                i++;
+            }
+            lua["APPrintJSONHandler"](tab);
+            });
+        AP->set_bounced_handler([](const json& data) {
+            API::LuaLock _{};
+            sol::state_view lua{ g_lua };
+            lua["APBouncedHandler"](JsonToTable(data));
             });
         return true;
     }
@@ -619,6 +713,7 @@ std::string random_string(size_t length)
 
 void SetSpecificSeed(std::string seed) {
     std::seed_seq seedseq(seed.begin(), seed.end());
+    delete randgen;
     randgen = new std::default_random_engine(seedseq);
 }
 
@@ -629,13 +724,14 @@ void SetRandomSeed() {
 
 int UniformRandomInteger(int min, int max) {
     std::uniform_int_distribution<int> gen(min, max);
-    return gen(randgen);
+    return gen(*randgen);
 }
 
-int NormalRandomInteger(int mu, int sigma) {
+int NormalRandomInteger(double mu, double sigma) {
     //we don't check bounds here, so the user must check for bounds themself
-    std::normal_distribution<int> gen(mu, sigma);
-    return gen(randgen);
+    std::normal_distribution<double> gen(mu, sigma);
+
+    return int(gen(*randgen));
 }
 
 #pragma endregion
@@ -651,7 +747,20 @@ void on_lua_state_created(lua_State* l) {
 
     // adds a new function to call from lua!
     lua["APGameName"] = ""; //Default to allow for calling as a text client, and ensure connection doesn't immediately fail
-    lua["APClientSay"] = APClientSay;
+    lua["APSay"] = APSay;
+    lua["APGameComplete"] = APGameComplete;
+    lua["APIsConnected"] = APIsConnected;
+    lua["APGetItemName"] = APGetItemName;
+    lua["APGetLocationName"] = APGetLocationName;
+    lua["APGetPlayerAlias"] = APGetPlayerAlias;
+    lua["APGetPlayerNumber"] = APGetPlayerNumber;
+    lua["APGetTeamNumber"] = APGetTeamNumber;
+    lua["APGetSlot"] = APGetSlot;
+    lua["APGetSeed"] = APGetSeed;
+    lua["SetRandomSeed"] = SetRandomSeed;
+    lua["SetSpecificSeed"] = SetSpecificSeed;
+    lua["UniformRandomInteger"] = UniformRandomInteger;
+    lua["NormalRandomInteger"] = NormalRandomInteger;
 }
 
 void on_lua_state_destroyed(lua_State* l) {
@@ -736,7 +845,7 @@ extern "C" __declspec(dllexport) void reframework_plugin_required_version(REFram
     version->patch = REFRAMEWORK_PLUGIN_VERSION_PATCH;
 
     // Optionally, specify a specific game name that this plugin is compatible with.
-    //version->game_name = "MHRISE";
+    version->game_name = "MHRISE";
 }
 
 extern "C" __declspec(dllexport) bool reframework_plugin_initialize(const REFrameworkPluginInitializeParam * param) {
