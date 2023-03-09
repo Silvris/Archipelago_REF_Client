@@ -114,7 +114,7 @@
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <AdditionalIncludeDirectories>include;subprojects/asio/include;subprojects/json/include;subprojects\websocketpp;subprojects\wswrap\include;subprojects\valijson\include;subprojects/apclientpp;subprojects/sol;subprojects/lua/src;subprojects/imgui</AdditionalIncludeDirectories>
       <AdditionalOptions>/Zc:__cplusplus /bigobj %(AdditionalOptions)</AdditionalOptions>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -134,7 +134,7 @@
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <AdditionalOptions>/Zc:__cplusplus /bigobj %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>include;subprojects/asio/include;subprojects/json/include;subprojects\websocketpp;subprojects\wswrap\include;subprojects\valijson\include;subprojects/apclientpp;subprojects/sol;subprojects/lua/src;subprojects/imgui</AdditionalIncludeDirectories>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp20</LanguageStandard>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>

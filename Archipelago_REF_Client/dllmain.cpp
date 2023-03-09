@@ -63,7 +63,7 @@ bool isWithoutRando = true;
 bool APSay(std::string msg);
 bool ConnectAP(std::string uri = "");
 
-std::default_random_engine* randgen;
+std::default_random_engine randgen;
 
 
 #pragma region IMGUIFunctions
@@ -526,6 +526,26 @@ bool initialize_imgui() {
 #pragma endregion
 
 #pragma region ArchipelagoFunctions
+sol::table JsonToTable(const json& data) {
+    API::LuaLock _{};
+    sol::state_view lua{ g_lua };
+    sol::table tab(lua, sol::create);
+    for (auto& it : data.items()) {
+        if (it.value().is_object() || it.value().is_array()) {
+            tab.set(it.key(), JsonToTable(it.value()));
+        }
+        else if (it.value().is_boolean())
+            tab.set(it.key(), it.value().get<bool>());
+        else if (it.value().is_number_integer())
+            tab.set(it.key(), it.value().get<int>());
+        else if (it.value().is_number_float())
+            tab.set(it.key(), it.value().get<float>());
+        else if (it.value().is_string())
+            tab.set(it.key(), it.value().get<std::string>());
+    }
+    return tab;
+}
+
 bool APSay(std::string msg) {
     if (AP == nullptr || !(AP->get_state() == APClient::State::SLOT_CONNECTED)) return false;
     return AP->Say(msg);
@@ -575,24 +595,60 @@ int APGetTeamNumber() {
     return AP->get_team_number();
 }
 
-sol::table JsonToTable(const json& data) {
-    API::LuaLock _{};
-    sol::state_view lua{ g_lua };
-    sol::table tab(lua, sol::create);
-    for (auto& it : data.items()) {
-        if (it.value().is_object() || it.value().is_array()) {
-            tab.set(it.key(), JsonToTable(it.value()));
-        }
-        else if (it.value().is_boolean())
-            tab.set(it.key(), it.value().get<bool>());
-        else if (it.value().is_number_integer())
-            tab.set(it.key(), it.value().get<int>());
-        else if (it.value().is_number_float())
-            tab.set(it.key(), it.value().get<float>());
-        else if (it.value().is_string())
-            tab.set(it.key(), it.value().get<std::string>());
+int APLocationChecks(sol::table table) {
+    if (AP == nullptr) return -1;
+    std::list<int64_t> locations;
+    for (int i = 1; i < table.size(); i++) {
+        int location = table[i];
+        locations.push_back(location);
     }
-    return tab;
+    return AP->LocationChecks(locations);
+}
+
+int APLocationScouts(sol::table table, int create_as_hint = 0) {
+    if (AP == nullptr) return -1;
+    std::list<int64_t> locations;
+    for (int i = 1; i < table.size(); i++) {
+        int64_t location = table[i];
+        locations.push_back(location);
+    }
+    return AP->LocationScouts(locations, create_as_hint);
+}
+
+int APGetData(sol::table table) {
+    if (AP == nullptr) return -1;
+    std::list <std::string> keys;
+    for (int i = 1; i < table.size(); i++) {
+        std::string str = table[i];
+        keys.push_back(str);
+    }
+    return AP->Get(keys);
+}
+
+int APSetData(sol::table table) {
+    if (AP == nullptr) return -1;
+    std::string key = table["key"];
+    auto default_val = table["default"];
+    bool want_reply = table["want_reply"];
+    std::list<APClient::DataStorageOperation> operations;
+    sol::table opTable = table["operations"];
+    for (int i = 1; i < table.size(); i++) {
+        APClient::DataStorageOperation* op = new APClient::DataStorageOperation();
+        op->operation = opTable[i]["operation"];
+        op->value = opTable[i]["value"];
+        operations.push_back(*op);
+    }
+    return AP->Set(key,default_val, want_reply, operations);
+}
+
+int APSetNotify(sol::table table) {
+    if (AP == nullptr) return -1;
+    std::list <std::string> keys;
+    for (int i = 1; i < table.size(); i++) {
+        std::string str = table[i];
+        keys.push_back(str);
+    }
+    return AP->SetNotify(keys);
 }
 
 bool ConnectAP(std::string uri) {
@@ -642,10 +698,69 @@ bool ConnectAP(std::string uri) {
             }
         );
         AP->set_items_received_handler([](const std::list<APClient::NetworkItem>& data) {
-
+            API::LuaLock _{};
+            sol::state_view lua{ g_lua };
+            sol::table tab(lua, sol::create);
+            int i = 1;
+            for (auto it : data)
+            {
+                sol::table table(lua, sol::create);
+                table.set(
+                    "location", it.location,
+                    "item", it.item,
+                    "player", it.player,
+                    "index", it.index,
+                    "flags", it.flags);
+                tab.set(i, table);
+                i++;
+            }
+            lua["APItemsReceivedHandler"](tab);
             });
         AP->set_location_checked_handler([](const std::list<int64_t>& data) {
-
+            API::LuaLock _{};
+            sol::state_view lua{ g_lua };
+            sol::table tab(lua, sol::create);
+            int i = 1;
+            for (auto it : data)
+            {
+                tab.set(i, it);
+                i++;
+            }
+            lua["APLocationsCheckedHandler"](tab);
+            });
+        AP->set_location_info_handler([](const std::list<APClient::NetworkItem>& data) {
+            API::LuaLock _{};
+            sol::state_view lua{ g_lua };
+            sol::table tab(lua, sol::create);
+            int i = 1;
+            for (auto it : data)
+            {
+                sol::table table(lua, sol::create);
+                table.set(
+                    "item", it.item,
+                    "location", it.location,
+                    "player", it.player,
+                    "flags", it.flags);
+                tab.set(i, it);
+                i++;
+            }
+            lua["APLocationInfoHandler"](tab);
+            }
+        );
+        AP->set_retrieved_handler([](const std::map<std::string, json> data) {
+            API::LuaLock _{};
+            sol::state_view lua{ g_lua };
+            sol::table tab(lua, sol::create);
+            for (auto pair : data) {
+                tab.set(pair.first, JsonToTable(pair.second));
+            }
+            lua["APRetrievedHandler"](tab);
+            });
+        AP->set_set_reply_handler([](const std::string key, const json& value, const json& original_value) {
+            // convert the two jsons and then just pass to lua
+            API::LuaLock _{};
+            sol::state_view lua{ g_lua };
+            lua["APSetReplyHandler"](key, JsonToTable(value), JsonToTable(original_value));
             });
         AP->set_data_package_changed_handler([](const json& data) {
             AP->save_data_package(DATAPACKAGE_CACHE);
@@ -713,8 +828,7 @@ std::string random_string(size_t length)
 
 void SetSpecificSeed(std::string seed) {
     std::seed_seq seedseq(seed.begin(), seed.end());
-    delete randgen;
-    randgen = new std::default_random_engine(seedseq);
+    randgen.seed(seedseq);
 }
 
 void SetRandomSeed() {
@@ -724,14 +838,16 @@ void SetRandomSeed() {
 
 int UniformRandomInteger(int min, int max) {
     std::uniform_int_distribution<int> gen(min, max);
-    return gen(*randgen);
+    int rand = gen(randgen);
+    return rand;
 }
 
 int NormalRandomInteger(double mu, double sigma) {
     //we don't check bounds here, so the user must check for bounds themself
     std::normal_distribution<double> gen(mu, sigma);
 
-    return int(gen(*randgen));
+    int rand = int(gen(randgen));
+    return rand;
 }
 
 #pragma endregion
@@ -757,6 +873,11 @@ void on_lua_state_created(lua_State* l) {
     lua["APGetTeamNumber"] = APGetTeamNumber;
     lua["APGetSlot"] = APGetSlot;
     lua["APGetSeed"] = APGetSeed;
+    lua["APLocationChecks"] = APLocationChecks;
+    lua["APLocationScouts"] = APLocationScouts;
+    lua["APGetData"] = APGetData;
+    lua["APSetData"] = APSetData;
+    lua["APSetNotify"] = APSetNotify;
     lua["SetRandomSeed"] = SetRandomSeed;
     lua["SetSpecificSeed"] = SetSpecificSeed;
     lua["UniformRandomInteger"] = UniformRandomInteger;
