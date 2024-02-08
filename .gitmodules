@@ -1,9 +1,0 @@
-[submodule "Archipelago_REF_Client/subprojects/apclientpp"]
-	path = Archipelago_REF_Client/subprojects/apclientpp
-	url = https://github.com/black-sliver/apclientpp
-[submodule "Archipelago_REF_Client/subprojects/wswrap"]
-	path = Archipelago_REF_Client/subprojects/wswrap
-	url = https://github.com/black-sliver/wswrap
-[submodule "Archipelago_REF_Client/subprojects/imgui"]
-	path = Archipelago_REF_Client/subprojects/imgui
-	url = https://github.com/ocornut/imgui
