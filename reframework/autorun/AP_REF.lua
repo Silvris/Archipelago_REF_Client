@@ -224,7 +224,8 @@ end
 function APConnect(host)
     local uuid = ""
 	if APGameName == "" then
-		table.insert(APTags, )
+		table.insert(APTags, "TextOnly")
+	end
     APClient = AP(uuid, APGameName, host)
 	debug_print("Connecting")
     set_socket_connected_handler(on_socket_connected)
