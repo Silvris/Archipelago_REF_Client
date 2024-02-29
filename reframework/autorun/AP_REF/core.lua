@@ -73,10 +73,21 @@ local disconnect_client = false
 
 local DEBUG = false
 
+function AP_REF.PrintToLog(message, color)
+	if color == nil then
+		color = "FFFFFF"
+	end
+	table.insert(textLog, {{text=message, color=AP_REF.HexToImguiColor(color)}})
+end
+
 local function debug_print(str)
 	if DEBUG then
 		log.debug(str)
 	end
+end
+
+local function callback_true()
+	return true
 end
 
 local function callback_passthrough()
@@ -176,6 +187,9 @@ AP_REF.on_print_json = callback_passthrough_two_arg
 AP_REF.on_bounced = callback_passthrough_one_arg
 AP_REF.on_retrieved = callback_passthrough_three_arg
 AP_REF.on_set_reply = callback_passthrough_one_arg
+
+-- use to block connecting while game is in invalid state
+AP_REF.on_attempt_connect = callback_true
 
 
 local function set_socket_connected_handler(callback)
@@ -361,7 +375,9 @@ local function main_menu()
 			end
 		else
 			if imgui.button("Connect") then
-				APConnect(host)
+				if AP_REF.on_attempt_connect() then
+					APConnect(host)
+				end
 			end
 		end
 		imgui.pop_item_width()
